@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template. The "Generate Helper Plists" build phase substitutes
+     __DEVELOPMENT_TEAM__ and writes the result to $(DERIVED_FILE_DIR); the
+     linker then embeds that copy via -sectcreate __TEXT __info_plist.
+     Do not embed this file directly: -sectcreate performs no substitution. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
@@ -9,10 +13,10 @@
 	<key>CFBundleName</key>
 	<string>FermataHelper</string>
 	<key>CFBundleVersion</key>
-	<string>1.2</string>
+	<string>2</string>
 	<key>SMAuthorizedClients</key>
 	<array>
-		<string>identifier com.iccir.Fermata</string>
+		<string>identifier "com.iccir.Fermata" and anchor apple generic and certificate leaf[subject.OU] = "__DEVELOPMENT_TEAM__"</string>
 	</array>
 </dict>
 </plist>

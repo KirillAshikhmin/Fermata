@@ -6,6 +6,7 @@
 NSString * const EntryDidUpdateNotification = @"EntryDidUpdateNotification";
 
 @import AppKit;
+@import UniformTypeIdentifiers;
 
 static NSString *sNameKey             = @"name";
 static NSString *sBundleIdentifierKey = @"bundle-identifier";
@@ -41,12 +42,15 @@ static NSString *sTypeKey             = @"action";
 - (NSImage *) image
 {
     NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
-    NSString    *path      = [workspace absolutePathForAppBundleWithIdentifier:_bundleIdentifier];
-    
-    if (path) {
-        return [workspace iconForFile:path];
+
+    NSURL *URL = [_bundleIdentifier length] ?
+        [workspace URLForApplicationWithBundleIdentifier:_bundleIdentifier] :
+        nil;
+
+    if (URL) {
+        return [workspace iconForFile:[URL path]];
     } else {
-        return [workspace iconForFileType: (__bridge id)kUTTypeApplicationBundle];
+        return [workspace iconForContentType:UTTypeApplicationBundle];
     }
 }
 

@@ -5,7 +5,7 @@
 #import "Entry.h"
 
 
-@import ServiceManagement;
+@import UniformTypeIdentifiers;
 
 @interface PreferencesController () 
 @property (nonatomic) IBOutlet NSTableView *tableView;
@@ -23,11 +23,15 @@
 - (IBAction) addEntry:(id)sender
 {
     NSOpenPanel *openPanel = [NSOpenPanel openPanel];
+
+    __weak PreferencesController *weakSelf = self;
     
-    [openPanel setAllowedFileTypes:@[ (__bridge id)kUTTypeApplicationBundle ]];
+    [openPanel setAllowedContentTypes:@[ UTTypeApplicationBundle ]];
     
     [openPanel beginSheetModalForWindow:[self window] completionHandler:^(NSModalResponse result) {
-        if (result == NSModalResponseAbort) return;
+        // NSOpenPanel reports a cancelled sheet as NSModalResponseCancel, never
+        // NSModalResponseAbort, so the old check let cancellation fall through.
+        if (result != NSModalResponseOK) return;
         
         NSURL *URL = [openPanel URL];
         if (!URL) return;
@@ -50,7 +54,7 @@
                 [entry setBundleIdentifier:bundleIdentifier];
                 [entry setType:EntryTypePreventLidCloseSleepWhenIdleSleepPrevented];
                 
-                [_entryArrayController addObject:entry];
+                [[weakSelf entryArrayController] addObject:entry];
             }
         }
     }];

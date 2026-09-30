@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Copied into Fermata.app/Contents/Library/LaunchDaemons and registered with
+     +[SMAppService daemonServiceWithPlistName:]. BundleProgram is an app-bundle
+     relative path, so the same executable also serves the SMJobBless fallback. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.iccir.Fermata.Helper</string>
+	<key>BundleProgram</key>
+	<string>Contents/Library/LaunchServices/com.iccir.Fermata.Helper</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.iccir.Fermata</string>
+	</array>
+	<key>MachServices</key>
+	<dict>
+		<key>com.iccir.Fermata.Helper</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

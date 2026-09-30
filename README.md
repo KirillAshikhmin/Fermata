@@ -16,10 +16,16 @@ Many DJs and musicians use headphones during live performances. It's common to p
 
 Unfortunately, macOS has no built-in option to disable the Lid Close sensor. Apps such as [InsomniaX](https://github.com/semaja2/InsomniaX) and [NoSleep](https://github.com/integralpro/nosleep) attempt to prevent it via a kernel extension. I had issues getting these apps to work due to Apple's [System Integrity Protection](https://en.wikipedia.org/wiki/System_Integrity_Protection) and [User-Approved Kernel Extension Loading](https://developer.apple.com/library/content/technotes/tn2459/_index.html). 
 
+## Requirements
+
+macOS 13 (Ventura) or later, on Apple Silicon or Intel. Releases built from this
+fork are universal binaries (`arm64` + `x86_64`).
+
 ## Installation and Usage
 
-1. [Download the latest release](https://github.com/iccir/Fermata/releases) of Fermata.
-2. Copy the downloaded application to your `/Applications` folder and launch it.
+1. [Download the latest release](https://github.com/iccir/Fermata/releases) of Fermata,
+   or build it yourself (see [Building](#building)).
+2. Copy the application to your `/Applications` folder and launch it.
 3. Click on the fermata icon in the top-right corner of your menu bar.
 4. Click "Preferences…".
 5. Add your favorite music app. By default, Fermata is configured to work with [Embrace](https://www.ricciadams.com/projects/embrace) (my DJ app).
@@ -28,9 +34,40 @@ When Embrace starts to play audio, it prevents Idle Sleep via a call to `-[NSPro
 
 Some applications may not properly prevent Idle Sleep. For these apps, use the "is running" option rather than "is preventing Idle Sleep".
 
+## Building
+
+Open `Fermata.xcodeproj` and build the `Fermata` scheme, or:
+
+    xcodebuild -project Fermata.xcodeproj -scheme Fermata -configuration Release build
+
+`Config/Fermata.xcconfig` holds every setting a fork needs to change. In
+particular, set `FERMATA_DEVELOPMENT_TEAM` to your own Team ID — it feeds
+`DEVELOPMENT_TEAM`, the `SMPrivilegedExecutables` requirement in the app's
+Info.plist, and the `SMAuthorizedClients` requirement embedded into the helper
+tool, so all three stay consistent. Note that a Team ID is the `OU` field of
+your signing certificate, which is *not* the identifier shown in the
+certificate's common name.
+
+`CODE_SIGN_IDENTITY` defaults to `Apple Development`, which is enough to build
+and run locally. Change it to `Developer ID Application` for builds you intend
+to distribute.
+
 ## How?
 
 Note: this is private SPI and is **unsupported by Apple**. It could break in the future; it could cause your computer to explode; it could cause the Apple Power Management Team to show up at my doorstep and angrily chastise me; etc.
+
+#### Fermata 1.3
+
+Universal binary for Apple Silicon and Intel; minimum macOS raised to 13.
+
+The privileged helper is now installed with `SMAppService`, falling back to the
+deprecated `SMJobBless` when `SMAppService` refuses the registration — it
+requires the containing app to be notarized, which rules it out for locally
+signed builds. The separate "Launch Fermata" login-item application is gone;
+`+[SMAppService mainAppService]` registers Fermata itself.
+
+The helper also pins its XPC listener to a code signing requirement, so it no
+longer vends a root-privileged Mach service to every process on the system.
 
 #### Fermata 1.1
 

@@ -3,6 +3,7 @@
 
 #import "AppDelegate.h"
 #import "RestlessEngine.h"
+#import "HelperInstaller.h"
 #import "PreferencesController.h"
 #import "Entry.h"
 
@@ -12,6 +13,7 @@
 static NSString * const LaunchAtLoginPreferenceKey        = @"LaunchAtLogin";
 static NSString * const RestlessApplicationsPreferenceKey = @"RestlessApplications";
 static NSString * const ManualPreventionKey               = @"ManualPrevention";
+static NSString * const ManualPreventionStartTimeKey      = @"ManualPreventionStartTime";
 static NSString * const ManualDurationKey                 = @"ManualDuration";
 static NSString * const UpdateFrequencyKey                = @"UpdateFrequency";
 static NSString * const ReenableDelayKey                  = @"ReenableDelay";
@@ -31,13 +33,14 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
     NSStatusItem   *_statusItem;
     NSImage *_onImage;
     NSImage *_offImage;
-    
+
     RestlessEngine *_engine;
     PreferencesController *_preferencesController;
     NSTimer *_timer;
 
     BOOL _applicationIsTerminating;
-    
+    BOOL _didShowHelperApprovalAlert;
+
     BOOL _manualPreventionActive;
     NSTimeInterval _manualPreventionStartTime;
     NSTimer *_manualPreventionTimer;
@@ -56,31 +59,37 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
             @"bundle-identifier": @"com.iccir.Embrace",
             @"action": @( EntryTypePreventLidCloseSleepWhenIdleSleepPrevented )
         } ],
-        
+
         UpdateFrequencyKey: @10,
         ReenableDelayKey:   @10,
         ManualDurationKey:  @10,
-        
+
         AlsoPreventDiskSleepKey:    @NO,
         AlsoPreventDisplaySleepKey: @NO
     };
-    
+
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaults];
+
+    __weak AppDelegate *weakSelf = self;
 
     _engine = [[RestlessEngine alloc] init];
     [_engine addObserver:self forKeyPath:@"preventingLidCloseSleep" options:0 context:NULL];
-    
+    [_engine setHelperNeedsApprovalHandler:^{
+        [weakSelf _showHelperApprovalAlert];
+    }];
+
     [_engine checkHelper];
-    
+
     _statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:30.0];
 
     _onImage  = [NSImage imageNamed:@"StatusItemIconOn"];
     _offImage = [NSImage imageNamed:@"StatusItemIconOff"];
 
-    [_statusItem setImage:_offImage];
-    [_statusItem setHighlightMode:YES];
+    // -[NSStatusItem setImage:] and -setHighlightMode: were deprecated in 10.14;
+    // the button is the supported way to present a status item.
+    [[_statusItem button] setImage:_offImage];
     [_statusItem setMenu:[self statusItemMenu]];
-    
+
     [self _updateTimer];
 
     [self _loadState];
@@ -91,7 +100,7 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_handleUserDefaultsDidChangeNotification:) name:NSUserDefaultsDidChangeNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_handleEntryDidUpdateNotification:)        name:EntryDidUpdateNotification          object:nil];
 
-    [[NSDistributedNotificationCenter defaultCenter] addObserver: self 
+    [[NSDistributedNotificationCenter defaultCenter] addObserver: self
                                                         selector: @selector(_handleFermataUpdateNotification:)
                                                             name: @"com.iccir.Fermata.Update"
                                                           object: nil
@@ -104,7 +113,7 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
 - (NSApplicationTerminateReply) applicationShouldTerminate:(NSApplication *)sender
 {
     _applicationIsTerminating = YES;
-    
+
     [_engine allowLidCloseSleepWithCallback:^{
         [[NSApplication sharedApplication] replyToApplicationShouldTerminate:YES];
     }];
@@ -113,12 +122,23 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
 }
 
 
+- (void) applicationWillTerminate:(NSNotification *)note
+{
+    [_engine removeObserver:self forKeyPath:@"preventingLidCloseSleep"];
+    [_entryArrayController removeObserver:self forKeyPath:@"arrangedObjects"];
+    [[NSWorkspace sharedWorkspace] removeObserver:self forKeyPath:@"runningApplications"];
+
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
+}
+
+
 - (BOOL) validateMenuItem:(NSMenuItem *)menuItem
 {
     SEL action = [menuItem action];
 
     if (action == @selector(preventLidCloseSleep:)) {
-        [menuItem setState:(_manualPreventionActive ? NSOnState : NSOffState)];
+        [menuItem setState:(_manualPreventionActive ? NSControlStateValueOn : NSControlStateValueOff)];
 
         if ([[NSUserDefaults standardUserDefaults] integerForKey:ManualDurationKey] > 0) {
             [menuItem setTitle:@"Postpone Lid Close Sleep"];
@@ -126,7 +146,7 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
             [menuItem setTitle:@"Prevent Lid Close Sleep"];
         }
     }
-    
+
     return YES;
 }
 
@@ -134,7 +154,7 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
 - (void) _updateTimer
 {
     NSTimeInterval updateFrequency = [[NSUserDefaults standardUserDefaults] doubleForKey:UpdateFrequencyKey];
-    
+
     if ([_timer timeInterval] != updateFrequency) {
         [_timer invalidate];
 
@@ -161,51 +181,127 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
         [entryArray addObject:[[Entry alloc] initWithDictionary:dictionary]];
     }
 
-    [self _setManualPreventionActive:[defaults boolForKey:ManualPreventionKey]];
-    
     _entryArrayController = [[NSArrayController alloc] initWithContent:entryArray];
     [_entryArrayController addObserver:self forKeyPath:@"arrangedObjects" options:0 context:NULL];
-    
+
     NSSortDescriptor *sortDescriptor = [NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES];
     [_entryArrayController setSortDescriptors:@[ sortDescriptor ]];
+
+    // Must come last: it ends in -_saveState, which writes the entry list back
+    // out. Running it before the controller existed persisted an empty array.
+    [self _restoreManualPrevention];
+}
+
+
+- (void) _restoreManualPrevention
+{
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+
+    if (![defaults boolForKey:ManualPreventionKey]) {
+        [self _setManualPreventionActive:NO];
+        return;
+    }
+
+    NSTimeInterval now       = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval startTime = [defaults doubleForKey:ManualPreventionStartTimeKey];
+
+    // A start time from a future clock reading, or none at all (state saved by
+    // an older build), can't be trusted as an origin for the countdown.
+    if ((startTime <= 0) || (startTime > now)) startTime = now;
+
+    NSInteger durationInMinutes = [defaults integerForKey:ManualDurationKey];
+
+    // Don't silently restart a countdown that ran out while Fermata was closed.
+    if ((durationInMinutes > 0) && (now > (startTime + (durationInMinutes * 60.0)))) {
+        [self _setManualPreventionActive:NO];
+        return;
+    }
+
+    [self _setManualPreventionActive:YES startTime:startTime];
 }
 
 
 - (void) _saveState
 {
-    NSMutableArray *dictionaries = [NSMutableArray array];
-
-    for (Entry *entry in [_entryArrayController arrangedObjects]) {
-        [dictionaries addObject:[entry dictionaryRepresentation]];
-    }
-    
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setObject:dictionaries forKey:RestlessApplicationsPreferenceKey];
+
+    // -_saveState can run before -_loadState finishes building the controller;
+    // writing the empty list at that point would discard the user's apps.
+    if (_entryArrayController) {
+        NSMutableArray *dictionaries = [NSMutableArray array];
+
+        for (Entry *entry in [_entryArrayController arrangedObjects]) {
+            [dictionaries addObject:[entry dictionaryRepresentation]];
+        }
+
+        [defaults setObject:dictionaries forKey:RestlessApplicationsPreferenceKey];
+    }
+
     [defaults setBool:_manualPreventionActive forKey:ManualPreventionKey];
-    
-    [defaults synchronize];
+    [defaults setDouble:_manualPreventionStartTime forKey:ManualPreventionStartTimeKey];
 }
 
 
 - (void) _updateLaunchHelper
 {
-    BOOL launchAtLogin = [[NSUserDefaults standardUserDefaults] boolForKey:@"LaunchAtLogin"];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
-    CFStringRef bundleID = CFSTR("com.iccir.Fermata.Launcher");
+    BOOL launchAtLogin = [defaults boolForKey:LaunchAtLoginPreferenceKey];
+
+    SMAppService      *service = [SMAppService mainAppService];
+    SMAppServiceStatus status  = [service status];
+
+    // The user can revoke a login item from System Settings. Mirror that back
+    // into the preference rather than re-registering behind their back.
+    if (launchAtLogin && (status == SMAppServiceStatusRequiresApproval)) {
+        [defaults setBool:NO forKey:LaunchAtLoginPreferenceKey];
+        return;
+    }
+
+    if (launchAtLogin == (status == SMAppServiceStatusEnabled)) return;
+
+    NSError *error = nil;
+
+    BOOL didUpdate = launchAtLogin ?
+        [service registerAndReturnError:&error] :
+        [service unregisterAndReturnError:&error];
+
+    if (didUpdate) return;
+
+    // Already in the requested state — nothing went wrong.
+    if ( launchAtLogin && ([error code] == kSMErrorAlreadyRegistered)) return;
+    if (!launchAtLogin && ([error code] == kSMErrorJobNotFound))       return;
+
+    NSLog(@"Couldn't %@ Fermata as a login item: %@", launchAtLogin ? @"register" : @"unregister", error);
 
     if (launchAtLogin) {
-        if (!SMLoginItemSetEnabled(bundleID, YES)) {
-            NSString *errorMessage = NSLocalizedString(@"Couldn't add Fermata to Login Items list.", nil);
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setMessageText:NSLocalizedString(@"Couldn't add Fermata to the Login Items list.", nil)];
+        [alert setInformativeText:[error localizedDescription] ?: @""];
+        [alert runModal];
 
-            NSAlert *alert = [[NSAlert alloc] init];
-            [alert setInformativeText:errorMessage];
-            [alert runModal];
-            
-            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"LaunchAtLogin"];
-        }
+        [defaults setBool:NO forKey:LaunchAtLoginPreferenceKey];
+    }
+}
 
-    } else {
-        SMLoginItemSetEnabled(bundleID, NO);
+
+- (void) _showHelperApprovalAlert
+{
+    if (_didShowHelperApprovalAlert) return;
+    _didShowHelperApprovalAlert = YES;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+
+    [alert setMessageText:NSLocalizedString(@"Fermata needs permission to run its helper.", nil)];
+    [alert setInformativeText:NSLocalizedString(@"Until Fermata is enabled in System Settings › General › Login Items, it can't prevent Lid Close Sleep.", nil)];
+
+    [alert addButtonWithTitle:NSLocalizedString(@"Open System Settings", nil)];
+    [alert addButtonWithTitle:NSLocalizedString(@"Later", nil)];
+
+    [NSApp activateIgnoringOtherApps:YES];
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        [HelperInstaller openSystemSettingsLoginItems];
     }
 }
 
@@ -232,9 +328,16 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
 
 - (void) _setManualPreventionActive:(BOOL)manualPreventionActive
 {
+    [self _setManualPreventionActive: manualPreventionActive
+                           startTime: (manualPreventionActive ? [NSDate timeIntervalSinceReferenceDate] : 0)];
+}
+
+
+- (void) _setManualPreventionActive:(BOOL)manualPreventionActive startTime:(NSTimeInterval)startTime
+{
     if (_manualPreventionActive != manualPreventionActive) {
         _manualPreventionActive = manualPreventionActive;
-        _manualPreventionStartTime = manualPreventionActive ? [NSDate timeIntervalSinceReferenceDate] : 0;
+        _manualPreventionStartTime = startTime;
     }
 
     if (_manualPreventionActive && !_manualPreventionTimer) {
@@ -264,10 +367,10 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
     CGRect masterRect = onImageRect;
     masterRect.size.height += 4;
     onImageRect.origin.y += 2;
-    
+
     NSImage *image = [NSImage imageWithSize:masterRect.size flipped:NO drawingHandler:^BOOL(NSRect dstRect) {
         [onImage drawInRect:onImageRect];
-        
+
         CGRect barRect = CGRectInset(masterRect, 2, 0);
         barRect.size.height = 2;
         [[NSBezierPath bezierPathWithRoundedRect:barRect xRadius:1 yRadius:1] addClip];
@@ -279,7 +382,7 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
         activeBarRect.size.width *= percentage;
         [[NSColor blackColor] set];
         [[NSBezierPath bezierPathWithRect:activeBarRect] fill];
-    
+
         return YES;
     }];
 
@@ -299,11 +402,11 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
         if (_manualPreventionActive && durationInMinutes) {
             NSTimeInterval duration  = durationInMinutes * 60;
             NSTimeInterval remaining = (_manualPreventionStartTime + duration) - [NSDate timeIntervalSinceReferenceDate];
-        
+
             CGFloat percent = remaining / duration;
             if (percent > 1) percent = 1;
             if (percent < 0) percent = 0;
-        
+
             image = [self _statusItemImageWithPercentage:percent];
 
         } else {
@@ -313,8 +416,8 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
     } else {
         image = _offImage;
     }
-    
-    [_statusItem setImage:image];
+
+    [[_statusItem button] setImage:image];
 }
 
 
@@ -334,7 +437,7 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
     //
     if (_manualPreventionActive) {
         shouldPrevent = YES;
-        
+
         NSInteger durationInMinutes = [defaults integerForKey:ManualDurationKey];
 
         if (durationInMinutes) {
@@ -357,9 +460,9 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
         for (Entry *entry in [_entryArrayController arrangedObjects]) {
             NSString  *bundleIdentifier = [entry bundleIdentifier];
             EntryType  type             = [entry type];
-            
+
             if (!bundleIdentifier) continue;
-            
+
             [bundleIDToEntryMap setObject:entry forKey:bundleIdentifier];
 
             if (type == EntryTypePreventLidCloseSleepWhenRunning) {
@@ -370,7 +473,7 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
             }
         }
     }
-    
+
     // Step 3 - Check RestlessActionPreventLidCloseSleepWhenIdleSleepPrevented
     //
     if (!shouldPrevent) {
@@ -378,9 +481,10 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
             pid_t pid = (pid_t)[pidNumber integerValue];
 
             NSString *bundleIdentifier = [[NSRunningApplication runningApplicationWithProcessIdentifier:pid] bundleIdentifier];
-            
+            if (!bundleIdentifier) continue;
+
             Entry *entry = [bundleIDToEntryMap objectForKey:bundleIdentifier];
-            
+
             if ([entry type] == EntryTypePreventLidCloseSleepWhenIdleSleepPrevented) {
                 shouldPrevent = YES;
                 break;
@@ -393,7 +497,7 @@ static NSString * const AlsoPreventDisplaySleepKey        = @"AlsoPreventDisplay
 
     if (shouldPrevent) {
         [_engine preventLidCloseSleep];
-        
+
     } else {
         [_engine allowLidCloseSleepAfter:reenableDelay];
     }
